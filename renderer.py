@@ -89,7 +89,7 @@ class Renderer:
                     continue
 
                 indent = '  ' * (lvl - 1)
-                marker = '|- '
+                marker = f'{lvl}- '
                 print(f"{indent}{marker}{child}")
                 count += 1
                 if child not in seen:
