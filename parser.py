@@ -25,9 +25,21 @@ def parse_package_and_imports(path: Path):
             import_map[simple] = imp
 
     # class declaration: collect extends + implements, resolve via imports when possible
-    related = []
+    implements = []
     # Work with the header portion up to the first '{' to handle multi-line declarations
-    header = content.split('{', 1)[0]
+    # Find the class/interface/enum keyword and then find the opening brace after it
+    class_match = re.search(r'\b(class|interface|enum)\b', content)
+    if class_match:
+        # Find the opening brace after the class keyword
+        class_start = class_match.start()
+        brace_pos = content.find('{', class_start)
+        if brace_pos != -1:
+            header = content[class_start:brace_pos]
+        else:
+            header = content[class_start:]
+    else:
+        header = content.split('{', 1)[0]
+    
     class_match = re.search(r'\b(class|interface|enum)\b', header)
 
     def resolve_name(name: str) -> str:
@@ -54,20 +66,15 @@ def parse_package_and_imports(path: Path):
         # extract extends/implements clauses from the header
         extends_m = re.search(r'extends\s+([a-zA-Z0-9_.\s,]+)', header)
         implements_m = re.search(r'implements\s+([a-zA-Z0-9_.\s,]+)', header)
-        if extends_m:
-            extends_str = extends_m.group(1)
-            for e in re.split(r'\s*,\s*', extends_str):
-                r = resolve_name(e)
-                if r:
-                    related.append(r)
         if implements_m:
             implements_str = implements_m.group(1)
             for i in re.split(r'\s*,\s*', implements_str):
                 r = resolve_name(i)
                 if r:
-                    related.append(r)
+                    implements.append(r)
 
-    return pkg, imports, related
+    # return package, imports list, implements list
+    return pkg, imports, implements
 
 
 def apply_filters(item, whitelist, blacklist):

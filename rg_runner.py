@@ -16,8 +16,10 @@ def build_rg_exclude_args(cfg=None):
     args = []
     if not cfg:
         return args
-    incs = cfg.get('include_globs') or []
-    excs = cfg.get('exclude_globs') or []
+    # backward-compatible: accept both new `ripgrep_*_patterns` keys and
+    # the older `include_globs`/`exclude_globs` names
+    incs = cfg.get('ripgrep_include_patterns') or cfg.get('include_globs') or []
+    excs = cfg.get('ripgrep_exclude_patterns') or cfg.get('exclude_globs') or []
     for p in incs:
         args.extend(['-g', p])
     for p in excs:
@@ -58,11 +60,14 @@ def get_files(root, files_cache=None, cfg=None):
 
 
 def precompute_files_cache(cfg, root):
-    if cfg.get('whitelist_regex'):
+    # Use import include patterns (new name) or fall back to legacy whitelist_regex.
+    include_pat = cfg.get('import_include_patterns') or cfg.get('whitelist_regex')
+    if include_pat:
         try:
-            pattern = rf'^package\s+{cfg["whitelist_regex"]}'
+            pattern = rf'^package\s+{include_pat}'
             cmd = ['rg', '--files-with-matches', '-g', '*.java', '-e', pattern, str(root)]
-            return run_ripgrep(cmd)
+            res = run_ripgrep(cmd)
+            return res if res else None
         except RuntimeError:
             return None
     return None

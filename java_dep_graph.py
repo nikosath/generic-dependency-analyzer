@@ -14,9 +14,20 @@ def log(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 
 def load_config():
-    # cfg holds user-configurable regexes and ripgrep-level exclude globs
-    # `exclude_globs` is a comma-separated list of ripgrep `-g` patterns
-    cfg = {'whitelist_regex': '', 'blacklist_regex': '', 'include_globs': [], 'exclude_globs': []}
+    # cfg holds user-configurable regexes and ripgrep-level include/exclude patterns
+    # New keys: `ripgrep_include_patterns`, `ripgrep_exclude_patterns`,
+    # `render_exclude_patterns`, `render_include_patterns`.
+    # Backwards-compatible old names are still accepted when present in the file.
+    cfg = {
+        'import_include_patterns': '',
+        'import_exclude_patterns': '',
+        'whitelist_regex': '',
+        'blacklist_regex': '',
+        'ripgrep_include_patterns': [],
+        'ripgrep_exclude_patterns': [],
+        'render_exclude_patterns': '',
+        'render_include_patterns': ''
+    }
     cwd_cfg = Path.cwd() / 'java-dep-graph.conf'
     script_cfg = SCRIPT_DIR / 'java-dep-graph.conf'
     cfg_file = cwd_cfg if cwd_cfg.exists() else (script_cfg if script_cfg.exists() else None)
@@ -25,34 +36,43 @@ def load_config():
             line = line.split('#', 1)[0].strip()
             if not line:
                 continue
-            if line.startswith('whitelist_regex='):
-                cfg['whitelist_regex'] = line.split('=',1)[1]
-            elif line.startswith('blacklist_regex='):
-                cfg['blacklist_regex'] = line.split('=',1)[1]
-            elif line.startswith('include_globs='):
+            if line.startswith('whitelist_regex=') or line.startswith('import_include_patterns='):
                 val = line.split('=',1)[1]
-                cfg['include_globs'] = [v.strip() for v in val.split(',') if v.strip()]
-            elif line.startswith('exclude_globs='):
+                cfg['import_include_patterns'] = val
+                cfg['whitelist_regex'] = val
+            elif line.startswith('blacklist_regex=') or line.startswith('import_exclude_patterns='):
+                val = line.split('=',1)[1]
+                cfg['import_exclude_patterns'] = val
+                cfg['blacklist_regex'] = val
+            elif line.startswith('render_exclude_patterns=') or line.startswith('render_exclude_list='):
+                cfg['render_exclude_patterns'] = line.split('=',1)[1]
+            elif line.startswith('render_include_patterns=') or line.startswith('render_include_list='):
+                cfg['render_include_patterns'] = line.split('=',1)[1]
+            elif line.startswith('ripgrep_include_patterns=') or line.startswith('include_globs='):
+                val = line.split('=',1)[1]
+                cfg['ripgrep_include_patterns'] = [v.strip() for v in val.split(',') if v.strip()]
+            elif line.startswith('ripgrep_exclude_patterns=') or line.startswith('exclude_globs='):
                 # comma-separated list of ripgrep glob patterns, e.g. !**/test/**,!**/src/test/**
                 val = line.split('=',1)[1]
-                cfg['exclude_globs'] = [v.strip() for v in val.split(',') if v.strip()]
-        if cfg['whitelist_regex']:
-            log('Loaded whitelist regex:', cfg['whitelist_regex'])
-        if cfg['blacklist_regex']:
-            log('Loaded blacklist regex:', cfg['blacklist_regex'])
+                cfg['ripgrep_exclude_patterns'] = [v.strip() for v in val.split(',') if v.strip()]
+        if cfg['import_include_patterns']:
+            log('Loaded import include patterns:', cfg['import_include_patterns'])
+        if cfg['import_exclude_patterns']:
+            log('Loaded import exclude patterns:', cfg['import_exclude_patterns'])
     return cfg
 
 def build_rg_exclude_args(cfg=None):
     """Return a list of ripgrep `-g` args.
-
-    Uses cfg['exclude_globs'] if present, otherwise empty list.
+    Uses cfg['ripgrep_exclude_patterns'] (new name) or falls back to
+    the older cfg['exclude_globs'] if present, otherwise empty list.
     """
-    if cfg and cfg.get('exclude_globs'):
-        args = []
-        for p in cfg['exclude_globs']:
-            args.extend(['-g', p])
-        return args
-    return []
+    if not cfg:
+        return []
+    excs = cfg.get('ripgrep_exclude_patterns') or cfg.get('exclude_globs') or []
+    args = []
+    for p in excs:
+        args.extend(['-g', p])
+    return args
 
 
 
@@ -73,7 +93,7 @@ def generate_dot(root, cfg):
         if not pkg:
             continue
         for imp in imports:
-            if parser.apply_filters(imp, cfg['whitelist_regex'], cfg['blacklist_regex']):
+            if parser.apply_filters(imp, cfg.get('import_include_patterns') or cfg.get('whitelist_regex'), cfg.get('import_exclude_patterns') or cfg.get('blacklist_regex')):
                 edges.add((pkg, imp))
     print('digraph Dependencies {')
     print('  node [shape=box, style=filled, color="#E8E8E8"];')
@@ -109,21 +129,22 @@ def list_imports_of_class(root, target, cfg, files_cache=None):
         sys.exit(1)
     log('Inspecting imports in:', str(file))
     _, imports, _ = parser.parse_package_and_imports(file)
-    filtered = [imp for imp in sorted(set(imports)) if parser.apply_filters(imp, cfg['whitelist_regex'], cfg['blacklist_regex'])]
+    filtered = [imp for imp in sorted(set(imports)) if parser.apply_filters(imp, cfg.get('import_include_patterns') or cfg.get('whitelist_regex'), cfg.get('import_exclude_patterns') or cfg.get('blacklist_regex'))]
     for imp in filtered:
         print(imp)
 
 def reverse_dependants(root, target_fqn, cfg, levels=0, sort_strategy=None, search='BFS', files_cache=None):
     # delegate traversal to specific BFS/DFS helper preserving existing behavior
-    if search.upper() == 'DFS':
-        results = finder.traverse_reverse_dfs(root, target_fqn, cfg, levels=levels, sort_strategy=sort_strategy, files_cache=files_cache)
-    else:
-        results = finder.traverse_reverse_bfs(root, target_fqn, cfg, levels=levels, sort_strategy=sort_strategy, files_cache=files_cache)
+    # Use DFS traversal only (BFS support removed).
+    results = finder.traverse_reverse_dfs(root, target_fqn, cfg, levels=levels, sort_strategy=sort_strategy, files_cache=files_cache)
 
     # build adjacency map parent -> [children] from recorded triples
     children = {}
     seen_links = set()
     for lvl, dep, parent in results:
+        # skip self-links where parent == dep
+        if parent == dep:
+            continue
         link = (parent, dep)
         if link in seen_links:
             continue
@@ -131,10 +152,10 @@ def reverse_dependants(root, target_fqn, cfg, levels=0, sort_strategy=None, sear
         children.setdefault(parent, []).append((lvl, dep))
 
     # If the initial target is a concrete class that implements/extends interfaces,
-    # include those interfaces at the same top level as the impl and also gather
-    # their reverse dependents so the interface is treated as a target too.
-    # This makes the interface appear as a child of the target (level 1) and
-    # shows dependents of the interface beneath it.
+    # collect those interfaces as `top_extras` so they are printed as separate
+    # top-level entries (not as children of the target). Also gather their
+    # reverse dependents so the interface is treated as a target too.
+    # If the target itself is an interface, find its implementations and add them as siblings.
     target_simple = target_fqn.split('.')[-1]
     target_file = find_class_file(root, target_simple, files_cache=files_cache, cfg=cfg)
     # fallback: search all java files (ignore include_globs) to locate the class file
@@ -149,41 +170,121 @@ def reverse_dependants(root, target_fqn, cfg, levels=0, sort_strategy=None, sear
                         break
         except Exception:
             target_file = None
+    top_extras = []
     if target_file:
-        pkg, imports, related = parser.parse_package_and_imports(target_file)
-        for rel in related:
-            if parser.apply_filters(rel, cfg['whitelist_regex'], cfg['blacklist_regex']):
-                # add the interface/superclass as a child of the target
-                link0 = (target_fqn, rel)
-                if link0 not in seen_links:
-                    seen_links.add(link0)
-                    children.setdefault(target_fqn, []).append((1, rel))
-                # run reverse traversal for the interface and merge results
-                if search.upper() == 'DFS':
+        pkg, imports, implements = parser.parse_package_and_imports(target_file)
+        
+        # Check if target is an interface (no 'implements' clause, but is an interface)
+        is_interface = 'interface' in open(target_file, 'r', encoding='utf-8', errors='ignore').read()
+        
+        if is_interface:
+            # Target is an interface - promote any dependents that implement it to top_extras (siblings)
+            promoted_impls = []
+            for lvl, dep in list(children.get(target_fqn, [])):
+                dep_file = find_class_file(root, dep.split('.')[-1], files_cache=files_cache, cfg=cfg)
+                if not dep_file:
+                    continue
+                _, _, dep_implements = parser.parse_package_and_imports(dep_file)
+                if target_fqn not in dep_implements:
+                    continue
+                if not parser.apply_filters(dep, cfg.get('import_include_patterns') or cfg.get('whitelist_regex'), cfg.get('import_exclude_patterns') or cfg.get('blacklist_regex')):
+                    continue
+                promoted_impls.append(dep)
+                if dep not in top_extras:
+                    top_extras.append(dep)
+                children.setdefault(dep, [])
+                extra = finder.traverse_reverse_dfs(root, dep, cfg, levels=levels, sort_strategy=sort_strategy, files_cache=files_cache)
+                for extra_lvl, extra_dep, extra_parent in extra:
+                    if extra_parent == extra_dep:
+                        continue
+                    link = (extra_parent, extra_dep)
+                    if link in seen_links:
+                        continue
+                    seen_links.add(link)
+                    children.setdefault(extra_parent, []).append((extra_lvl, extra_dep))
+            if promoted_impls and target_fqn in children:
+                children[target_fqn] = [(lvl, dep) for lvl, dep in children[target_fqn] if dep not in promoted_impls]
+        else:
+            # Target is a concrete class - promote only implemented interfaces to top_extras
+            for rel in implements:
+                if parser.apply_filters(rel, cfg.get('import_include_patterns') or cfg.get('whitelist_regex'), cfg.get('import_exclude_patterns') or cfg.get('blacklist_regex')):
+                    # promote the interface to top_extras instead of making it a child
+                    if rel not in top_extras:
+                        top_extras.append(rel)
+                    children.setdefault(rel, [])
+                    # run reverse traversal for the interface and merge results
+                    # Always use DFS for extra traversal
                     extra = finder.traverse_reverse_dfs(root, rel, cfg, levels=levels, sort_strategy=sort_strategy, files_cache=files_cache)
-                else:
-                    extra = finder.traverse_reverse_bfs(root, rel, cfg, levels=levels, sort_strategy=sort_strategy, files_cache=files_cache)
-                for lvl, dep, parent in extra:
-                    link = (parent, dep)
+                    for lvl, dep, parent in extra:
+                        # skip self-links
+                        if parent == dep:
+                            continue
+                        link = (parent, dep)
                     if link in seen_links:
                         continue
                     seen_links.add(link)
                     children.setdefault(parent, []).append((lvl, dep))
 
+    # For every parent -> child occurrence in `children`, add the child's
+    # implements/extends types as siblings under the same parent. Iterate over
+    # a snapshot of `children.items()` to avoid mutation issues while adding
+    # new sibling entries.
+    for parent, child_list in list(children.items()):
+        for lvl, dep in list(child_list):
+            # find class file for dep (use fallback to full scan if needed)
+            dep_simple = dep.split('.')[-1]
+            dep_file = find_class_file(root, dep_simple, files_cache=files_cache, cfg=cfg)
+            if not dep_file:
+                try:
+                    all_files = rg_runner.run_ripgrep(['rg', '--files', '-g', '*.java', str(root)])
+                    for f in all_files:
+                        if f.name == dep_simple + '.java':
+                            pkg_try, _, _ = parser.parse_package_and_imports(f)
+                            if pkg_try == '.'.join(dep.split('.')[:-1]):
+                                dep_file = f
+                                break
+                except Exception:
+                    dep_file = None
+            if not dep_file:
+                continue
+            _, _, implements = parser.parse_package_and_imports(dep_file)
+            for rel in implements:
+                if not parser.apply_filters(rel, cfg.get('import_include_patterns') or cfg.get('whitelist_regex'), cfg.get('import_exclude_patterns') or cfg.get('blacklist_regex')):
+                    continue
+                # avoid self-links and duplicates; add as sibling under same parent
+                if parent == rel or dep == rel:
+                    continue
+                link = (parent, rel)
+                if link in seen_links:
+                    continue
+                seen_links.add(link)
+                children.setdefault(parent, []).append((lvl, rel))
+
     # apply sorting to children lists only when lexicographic sorting requested
+    # also deduplicate children lists by dep to remove any accidental repeats
+    for p in list(children.keys()):
+        seen_deps = set()
+        new_lst = []
+        for lvl, dep in children.get(p, []):
+            if dep in seen_deps:
+                continue
+            seen_deps.add(dep)
+            new_lst.append((lvl, dep))
+        children[p] = new_lst
+
     if sort_strategy == 'lex':
         for p in children:
             children[p].sort(key=lambda t: t[1])
 
     # output: first line should be the target class (no leading spaces)
-    renderer = Renderer()
-    if search.upper() == 'DFS':
-        printed = renderer.render_dfs(children, target_fqn)
-    else:
-        printed = renderer.render_bfs(children, target_fqn)
+    renderer = Renderer(cfg.get('render_exclude_patterns'), cfg.get('render_include_patterns'))
+    # Render using DFS only (BFS rendering removed).
+    printed = renderer.render_dfs(children, target_fqn, top_extras=top_extras, allow_impl_pairs=True)
 
-    # final count: number of printed dependency lines
-    print(f'Dependents found: {printed}')
+    # final count: number of printed dependency lines, excluding top-level extras
+    top_count = len(top_extras) if 'top_extras' in locals() and top_extras else 0
+    final_count = printed - top_count
+    print(f'Dependents found: {final_count}')
 
 def main():
     argp = argparse.ArgumentParser()
@@ -192,7 +293,8 @@ def main():
     argp.add_argument('--reverse', action='store_true')
     argp.add_argument('--levels', type=int, default=0)
     argp.add_argument('--nosort', action='store_true', help='Disable all deterministic sorting for faster traversal')
-    argp.add_argument('--search', choices=['BFS','DFS'], default='BFS', help='Search strategy for reverse traversal')
+    # BFS support removed; DFS is the only supported search strategy now.
+    # The traversal helpers remain in `finder.py` for possible future re-enable.
     argp.add_argument('--verbose-rg', action='store_true', help='Print ripgrep commands to stderr')
     args = argp.parse_args()
 
@@ -224,7 +326,7 @@ def main():
         # Precompute files_cache from whitelist_regex to prune file set (improves performance)
         files_cache = rg_runner.precompute_files_cache(cfg, root)
 
-        reverse_dependants(root, target_fqn, cfg, levels=args.levels, sort_strategy=sort_strategy, search=args.search, files_cache=files_cache)
+        reverse_dependants(root, target_fqn, cfg, levels=args.levels, sort_strategy=sort_strategy, files_cache=files_cache)
         return
 
     if args.target and not args.reverse:
