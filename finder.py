@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 from rg_runner import build_rg_exclude_args, run_ripgrep
 import rg_runner
 from parser import parse_package_and_imports, apply_filters, is_test_path
 from pathlib import Path
 import sys
+from typing import Dict, List, Tuple
 
 
-def find_matches_for(cur, root, cfg, files_cache=None, sort_strategy=None):
+def find_matches_for(
+    cur: str,
+    root: Path,
+    cfg: dict | None,
+    files_cache: List[Path] | None = None,
+    sort_strategy: str | None = None,
+) -> List[Path]:
+    """Return files importing ``cur`` by running ripgrep with include/exclude filters."""
     cur_pkg = cur.rsplit('.', 1)[0] if '.' in cur else ''
     cmd = ['rg'] + build_rg_exclude_args(cfg) + ['--files-with-matches', '-F']
     # If ripgrep include patterns are not provided by cfg, fallback to searching all java files.
@@ -31,11 +41,25 @@ def find_matches_for(cur, root, cfg, files_cache=None, sort_strategy=None):
     return matches
 
 
-def traverse_reverse_dfs(root, target_fqn, cfg, levels=0, sort_strategy=None, files_cache=None):
+def traverse_reverse_dfs(
+    root: Path,
+    target_fqn: str,
+    cfg: dict | None,
+    levels: int = 0,
+    sort_strategy: str | None = None,
+    files_cache: List[Path] | None = None,
+) -> List[Tuple[int, str, str]]:
+    """Depth-first traversal producing (level, dependent, parent) triples."""
     seen = set([target_fqn])
     results = []  # list of (level, dep, parent)
     recorded_links = set()
     stack = [(target_fqn, 0)]
+    all_files = rg_runner.run_rg_files(root, cfg)
+    files_by_name = {}
+    for f in all_files:
+        files_by_name.setdefault(f.name, []).append(f)
+    def _candidates(simple_name: str):
+        return files_by_name.get(f"{simple_name}.java", [])
     while stack:
         cur, depth = stack.pop()
         if levels and depth >= levels:
@@ -69,51 +93,30 @@ def traverse_reverse_dfs(root, target_fqn, cfg, levels=0, sort_strategy=None, fi
             stack.append((dep, depth + 1))
             
             # If this is an implementation class, look for its interface and add both as siblings
+            dep_simple = dep.split('.')[-1]
             if dep.endswith('Impl') or dep.endswith('OperationImpl'):
-                # Get the file for this implementation to find what interface it implements
-                try:
-                    impl_simple_name = dep.split('.')[-1]
-                    all_files = rg_runner.run_ripgrep(['rg', '--files', '-g', '*.java', str(root)])
-                    for f in all_files:
-                        if f.name == impl_simple_name + '.java':
-                            impl_pkg, _, impl_implements = parse_package_and_imports(f)
-                            # For each interface this implementation implements, add it as a sibling at same level
-                            for interface in impl_implements:
-                                if interface not in seen and apply_filters(interface, cfg.get('import_include_patterns') or cfg.get('whitelist_regex'), cfg.get('import_exclude_patterns') or cfg.get('blacklist_regex')):
-                                    seen.add(interface)
-                                    # Add interface as sibling of implementation (same parent, same depth)
-                                    interface_link = (cur, interface)
-                                    if interface_link not in recorded_links:
-                                        recorded_links.add(interface_link)
-                                        results.append((depth + 1, interface, cur))
-                                    # Also traverse the interface for its own dependents
-                                    stack.append((interface, depth + 1))
-                            break
-                except Exception as e:
-                    print(f'Error searching for interfaces of {dep}: {e}', file=sys.stderr)
-            
-            # If this is an interface, look for its implementations by searching for class files
+                for candidate in _candidates(dep_simple):
+                    impl_pkg, _, impl_implements = parse_package_and_imports(candidate)
+                    impl_fqn = f'{impl_pkg}.{dep_simple}' if impl_pkg else dep_simple
+                    if dep in impl_implements and impl_fqn not in seen and apply_filters(impl_fqn, cfg.get('import_include_patterns') or cfg.get('whitelist_regex'), cfg.get('import_exclude_patterns') or cfg.get('blacklist_regex')):
+                        seen.add(impl_fqn)
+                        impl_link = (cur, impl_fqn)
+                        if impl_link not in recorded_links:
+                            recorded_links.add(impl_link)
+                            results.append((depth + 1, impl_fqn, cur))
+                        stack.append((impl_fqn, depth + 1))
             elif not dep.endswith('Impl') and not dep.endswith('OperationImpl'):
-                impl_simple_name = dep.split('.')[-1] + 'Impl'
-                # Search for implementation class files
-                try:
-                    all_files = rg_runner.run_ripgrep(['rg', '--files', '-g', '*.java', str(root)])
-                    for f in all_files:
-                        if f.name == impl_simple_name + '.java':
-                            impl_pkg, _, impl_implements = parse_package_and_imports(f)
-                            impl_fqn = f'{impl_pkg}.{impl_simple_name}' if impl_pkg else impl_simple_name
-                            
-                            # Check if this implementation implements our interface
-                            if dep in impl_implements:
-                                if impl_fqn not in seen and apply_filters(impl_fqn, cfg.get('import_include_patterns') or cfg.get('whitelist_regex'), cfg.get('import_exclude_patterns') or cfg.get('blacklist_regex')):
-                                    seen.add(impl_fqn)
-                                    impl_link = (cur, impl_fqn)
-                                    if impl_link not in recorded_links:
-                                        recorded_links.add(impl_link)
-                                        results.append((depth + 1, impl_fqn, cur))
-                                    stack.append((impl_fqn, depth + 1))
-                except Exception as e:
-                    print(f'Error searching for implementations of {dep}: {e}', file=sys.stderr)
+                impl_simple_name = f'{dep_simple}Impl'
+                for candidate in _candidates(impl_simple_name):
+                    impl_pkg, _, impl_implements = parse_package_and_imports(candidate)
+                    impl_fqn = f'{impl_pkg}.{impl_simple_name}' if impl_pkg else impl_simple_name
+                    if dep in impl_implements and impl_fqn not in seen and apply_filters(impl_fqn, cfg.get('import_include_patterns') or cfg.get('whitelist_regex'), cfg.get('import_exclude_patterns') or cfg.get('blacklist_regex')):
+                        seen.add(impl_fqn)
+                        impl_link = (cur, impl_fqn)
+                        if impl_link not in recorded_links:
+                            recorded_links.add(impl_link)
+                            results.append((depth + 1, impl_fqn, cur))
+                        stack.append((impl_fqn, depth + 1))
             
             for imp in implements:
                 if imp not in seen and apply_filters(imp, cfg.get('import_include_patterns') or cfg.get('whitelist_regex'), cfg.get('import_exclude_patterns') or cfg.get('blacklist_regex')):

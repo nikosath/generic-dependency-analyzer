@@ -40,12 +40,19 @@ class Renderer:
         from deprecated_bfs import render_bfs as _render_bfs
         return _render_bfs(children, target, top_extras=top_extras)
 
-    def render_dfs(self, children, target, top_extras=None, allow_impl_pairs=False):
+    def render_dfs(
+        self,
+        children: dict[str, list[tuple[int, str]]],
+        target: str,
+        top_extras: list[str] | None = None,
+        allow_impl_pairs: bool = False,
+    ) -> int:
+        """Render DFS tree respecting include/exclude patterns and implementation rules."""
         print(target)
         count = 0
-        seen = set([target])
+        seen: set[str] = {target}
 
-        def print_subtree(parent):
+        def print_subtree(parent: str):
             nonlocal count
             lst = children.get(parent, [])
             for idx, (lvl, child) in enumerate(lst):
@@ -60,30 +67,21 @@ class Renderer:
                 else:
                     if any(r.search(child) for r in self._exclude_res):
                         should_exclude = True
-                
-                # Allow implementations if they're part of implementation-interface pairs
-                    # OR if they are direct dependents (import the parent)
-                    if should_exclude and allow_impl_pairs and child.endswith('Impl'):
-                        # Check if this implementation's interface is also a child of the same parent
-                        interface_name = child[:-4]  # Remove 'Impl' suffix
-                        # Look for the interface in all children lists, not just the current parent
-                        interface_found = False
-                        for check_parent, check_children in children.items():
-                            for check_lvl, check_child in check_children:
-                                if check_child == interface_name:
-                                    interface_found = True
-                                    break
-                            if interface_found:
+                if should_exclude and allow_impl_pairs and child.endswith('Impl'):
+                    interface_name = child[:-4]
+                    interface_found = False
+                    for check_parent, check_children in children.items():
+                        for check_lvl, check_child in check_children:
+                            if check_child == interface_name:
+                                interface_found = True
                                 break
-                        
-                        # Always allow implementations that are direct dependents (they import the parent)
-                        # This handles cases where implementation imports parent but implements different interface
-                        direct_dependent = True  # If we found this implementation, it must be a dependent
-                        
-                        # Allow if interface found OR if this is a direct dependent (imports parent)
-                        # OR if this implementation directly imports the target (special case for direct dependents)
-                        if interface_found or direct_dependent or (parent == target and child.endswith('Impl')):
-                            should_exclude = False
+                        if interface_found:
+                            break
+                    
+                    direct_dependent = True
+                    
+                    if interface_found or direct_dependent or (parent == target and child.endswith('Impl')):
+                        should_exclude = False
                 
                 if should_exclude:
                     continue
